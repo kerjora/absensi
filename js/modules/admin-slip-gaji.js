@@ -234,7 +234,8 @@ export async function render(container, user, opts = {}) {
       </div>
       <div class="filter-row pg-head-actions">
         ${periodFilterHtml}
-        ${roleFlags.isKaryawan ? "" : `<button id="btn-export" class="btn-secondary">Export Ringkasan (Excel)</button>`}
+        ${roleFlags.isKaryawan ? "" : `<button id="btn-rekap" class="btn-secondary">Rekap Pembayaran</button>
+        <button id="btn-export" class="btn-secondary">Export Ringkasan (Excel)</button>`}
       </div>
     </div>
 
@@ -257,6 +258,22 @@ export async function render(container, user, opts = {}) {
           </div>
         </div>
         <div id="slip-content" class="slip-print-area"></div>
+      </div>
+    </div>
+
+    <!-- Modal: rekap pembayaran per tanggal bayar -->
+    <div id="modal-rekap" class="modal hidden">
+      <div class="modal-box modal-box-lg">
+        <h3>Rekap Pembayaran</h3>
+        <p class="muted small" style="margin-top:-4px;">Siapa saja yang dibayar pada satu tanggal, dari periode gaji mana pun — termasuk gaji tertunda yang dirilis bersamaan.</p>
+        <div class="slp-toolbar" style="margin-top:10px;">
+          <label class="small">Tanggal bayar <select id="rekap-date"></select></label>
+          <div style="display:flex; gap:8px;">
+            <button type="button" id="btn-rekap-export" class="btn-secondary">Export Excel (per tanggal bayar)</button>
+            <button type="button" id="btn-close-rekap" class="btn-primary">Tutup</button>
+          </div>
+        </div>
+        <div id="rekap-body" class="table-wrap"><p class="muted" style="padding:12px;">Memuat…</p></div>
       </div>
     </div>
 
@@ -315,6 +332,8 @@ export async function render(container, user, opts = {}) {
     loadAndRender();
   });
   document.getElementById("btn-export")?.addEventListener("click", doExport);
+  document.getElementById("btn-rekap")?.addEventListener("click", openRekap);
+  document.getElementById("btn-close-rekap")?.addEventListener("click", () => document.getElementById("modal-rekap").classList.add("hidden"));
   document.getElementById("btn-close-slip").addEventListener("click", () => document.getElementById("modal-slip").classList.add("hidden"));
   document.getElementById("btn-print-slip").addEventListener("click", printSlip);
   document.getElementById("btn-edit-adjust")?.addEventListener("click", () => openAdjustModal(currentSlip.emp.id));
@@ -1067,7 +1086,7 @@ async function renderPendingHolds() {
   const myPeriod = period;
   const { data, error } = await supabase.from("payroll_slips")
     .select("period, user_id, gaji_bersih, hold_reason, held_at, nama:snapshot->emp->>full_name")
-    .eq("pay_status", "ditahan").neq("period", period).order("period", { ascending: false });
+    .eq("pay_status", "ditahan").neq("period", period).order("held_at", { ascending: true }); // yang paling lama ditahan di atas
   if (error || !data?.length) return; // kolom belum ada (SQL 026 belum dijalankan) atau tidak ada yang tertunda
   if (myPeriod !== period) return; // pengguna sudah pindah periode saat query berjalan
   pendingData = data;
@@ -1084,7 +1103,7 @@ function drawPendingHolds() {
     <div class="pg-banner pg-banner-warn" style="flex-direction:column; align-items:stretch; gap:8px;">
       <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
         <div class="pg-banner-text"><strong>⏸ Gaji ditahan di periode lain (${pendingData.length})</strong>
-          <span>Belum dirilis. Centang lalu rilis langsung dari sini, atau buka periodenya.</span></div>
+          <span>Belum dirilis, diurutkan dari yang paling lama ditahan. Centang lalu rilis langsung dari sini, atau buka periodenya.</span></div>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
           <button type="button" class="btn-primary" id="pd-bayar" ${nSel ? "" : "disabled"}>Rilis terpilih (${nSel})</button>
           <button type="button" class="btn-secondary" id="pd-lepas" ${nSel ? "" : "disabled"}>Lepas tahan</button>
@@ -1093,7 +1112,7 @@ function drawPendingHolds() {
       <table class="table slp-pend-table" style="margin:0;">
         <thead><tr>
           <th style="width:34px;"><input type="checkbox" class="slp-chk" id="pd-all" ${nSel === pendingData.length ? "checked" : ""}></th>
-          <th>Nama</th><th>Periode</th><th>Gaji bersih</th><th>Alasan</th><th></th>
+          <th>Nama</th><th>Periode</th><th>Gaji bersih</th><th>Lama ditahan</th><th>Alasan</th><th></th>
         </tr></thead>
         <tbody>
           ${pendingData.map(r => `
@@ -1102,6 +1121,7 @@ function drawPendingHolds() {
               <td>${escapeHtml(r.nama || "—")}</td>
               <td>${escapeHtml(periodLabelFor(r.period))}</td>
               <td><strong>${fmtRupiah(r.gaji_bersih)}</strong></td>
+              <td>${heldAgeBadge(r.held_at)}</td>
               <td class="small muted">${escapeHtml(r.hold_reason || "")}</td>
               <td><button class="btn-link btn-goto" data-period="${escapeHtml(r.period)}">Buka periode</button></td>
             </tr>`).join("")}
@@ -1132,9 +1152,104 @@ function drawPendingHolds() {
   }));
 }
 
+// "ditahan 5 bulan" — beri tanda peringatan kalau sudah lewat 30 hari.
+function heldAgeText(heldAt) {
+  if (!heldAt) return "—";
+  const d = Math.max(0, Math.floor((Date.now() - new Date(heldAt).getTime()) / 86400000));
+  if (d < 1) return "hari ini";
+  if (d < 30) return `${d} hari`;
+  const m = Math.floor(d / 30);
+  return m < 12 ? `${m} bulan` : `${Math.floor(m / 12)} tahun ${m % 12} bulan`;
+}
+function heldAgeBadge(heldAt) {
+  if (!heldAt) return `<span class="muted">—</span>`;
+  const d = Math.floor((Date.now() - new Date(heldAt).getTime()) / 86400000);
+  return `<span class="badge ${d > 30 ? "badge-warn" : "badge-muted"}" title="Ditahan sejak ${escapeHtml(fmtDate(heldAt))}">${d > 30 ? "⚠ " : ""}${heldAgeText(heldAt)}</span>`;
+}
+
 function periodLabelFor(p) {
   const f = finalizedPeriods[p];
   return f ? `${fmtDate(f.period_start)} – ${fmtDate(f.period_end)}` : p;
+}
+
+// -----------------------------------------------------------------------
+// REKAP PEMBAYARAN per TANGGAL BAYAR (lintas periode)
+// Periode gaji = gaji itu hasil kerja kapan; tanggal bayar = uang keluar kapan.
+// Slip yang ditahan lalu dirilis bersama batch periode lain tetap berada di
+// periode aslinya, tapi muncul di rekap tanggal ia dibayar.
+// -----------------------------------------------------------------------
+let rekapRows = []; // slip yang dibayar pada tanggal terpilih
+
+async function openRekap() {
+  const modal = document.getElementById("modal-rekap");
+  const body = document.getElementById("rekap-body");
+  const sel = document.getElementById("rekap-date");
+  modal.classList.remove("hidden");
+  body.innerHTML = `<p class="muted" style="padding:12px;">Memuat…</p>`;
+  const { data, error } = await supabase.from("payroll_slips")
+    .select("paid_at").eq("pay_status", "dibayar").order("paid_at", { ascending: false }).limit(5000);
+  if (error) { body.innerHTML = `<p class="muted" style="padding:12px;">Belum ada data pembayaran (jalankan SQL 026 dulu).</p>`; sel.innerHTML = ""; return; }
+  const counts = {};
+  (data || []).forEach(r => { if (r.paid_at) counts[r.paid_at] = (counts[r.paid_at] || 0) + 1; });
+  const dates = Object.keys(counts).sort().reverse();
+  if (!dates.length) { sel.innerHTML = ""; body.innerHTML = `<p class="muted" style="padding:12px;">Belum ada slip yang ditandai dibayar.</p>`; rekapRows = []; return; }
+  sel.innerHTML = dates.map(d => `<option value="${d}">${fmtDate(d)} (${counts[d]} slip)</option>`).join("");
+  sel.onchange = () => loadRekap(sel.value);
+  document.getElementById("btn-rekap-export").onclick = exportRekap;
+  await loadRekap(dates[0]);
+}
+
+async function loadRekap(date) {
+  const body = document.getElementById("rekap-body");
+  body.innerHTML = `<p class="muted" style="padding:12px;">Memuat…</p>`;
+  const { data, error } = await supabase.from("payroll_slips")
+    .select("period, user_id, gaji_bersih, paid_at, pay_note, hold_reason, held_at, snapshot")
+    .eq("pay_status", "dibayar").eq("paid_at", date);
+  if (error) { body.innerHTML = `<p class="muted" style="padding:12px;">Gagal memuat: ${escapeHtml(error.message)}</p>`; return; }
+  const rows = data || [];
+  const newest = rows.reduce((m, r) => (r.period > m ? r.period : m), "");
+  rekapRows = rows
+    .map(r => ({ ...r, nama: r.snapshot?.emp?.full_name || "—", kode: r.snapshot?.emp?.employee_code || "-", dept: r.snapshot?.emp?.department || "-",
+      tertunda: !!r.held_at || r.period < newest }))
+    .sort((a, b) => (a.period === b.period ? a.nama.localeCompare(b.nama) : (a.period < b.period ? -1 : 1)));
+  const total = rekapRows.reduce((a, r) => a + (r.gaji_bersih || 0), 0);
+  const nTunda = rekapRows.filter(r => r.tertunda).length;
+  body.innerHTML = `
+    <div style="padding:10px 4px; display:flex; gap:16px; flex-wrap:wrap; align-items:baseline;">
+      <strong>Total dibayar ${escapeHtml(fmtDate(date))}: ${fmtRupiah(total)}</strong>
+      <span class="muted small">${rekapRows.length} slip${nTunda ? ` · ${nTunda} tertunda dari periode sebelumnya` : ""}</span>
+    </div>
+    <table class="table">
+      <thead><tr><th>Nama</th><th>Departemen</th><th>Periode gaji</th><th>Gaji bersih</th><th>Keterangan</th></tr></thead>
+      <tbody>
+        ${rekapRows.map(r => `
+          <tr>
+            <td>${escapeHtml(r.nama)}</td>
+            <td>${escapeHtml(r.dept)}</td>
+            <td>${escapeHtml(periodLabelFor(r.period))}${r.tertunda ? ` <span class="badge badge-warn">Tertunda</span>` : ""}</td>
+            <td><strong>${fmtRupiah(r.gaji_bersih)}</strong></td>
+            <td class="small muted">${escapeHtml([r.held_at && r.hold_reason ? `Ditahan: ${r.hold_reason}` : "", r.pay_note || ""].filter(Boolean).join(" · "))}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+
+function exportRekap() {
+  if (!rekapRows.length) { toast("Tidak ada data untuk diexport", "error"); return; }
+  const date = rekapRows[0].paid_at;
+  const rows = rekapRows.map(r => ({
+    "Tanggal Bayar": r.paid_at,
+    "Nama": r.nama,
+    "Kode Karyawan": r.kode,
+    "Departemen": r.dept,
+    "Periode Gaji": periodLabelFor(r.period),
+    "Gaji Bersih": r.gaji_bersih,
+    "Tertunda dari Periode Sebelumnya": r.tertunda ? "Ya" : "Tidak",
+    "Alasan Ditahan": r.hold_reason || "",
+    "Catatan Pembayaran": r.pay_note || "",
+  }));
+  rows.push({ "Tanggal Bayar": "", "Nama": "TOTAL", "Kode Karyawan": "", "Departemen": "", "Periode Gaji": "", "Gaji Bersih": rekapRows.reduce((a, r) => a + (r.gaji_bersih || 0), 0), "Tertunda dari Periode Sebelumnya": "", "Alasan Ditahan": "", "Catatan Pembayaran": "" });
+  exportXLSX(`rekap-pembayaran-${date}.xlsx`, rows, "Rekap Pembayaran");
 }
 
 // -----------------------------------------------------------------------
@@ -1254,6 +1369,13 @@ function renderSlipContent(s) {
 
       ${!s.level ? `<p class="small muted" style="margin-top:16px;">⚠️ Grade/Level karyawan ini belum cocok dengan data di Master Level — denda, lembur, BPJS, PPh21, dan uang dinas dihitung Rp 0. Lengkapi Master Level &amp; Data Karyawan terlebih dahulu.</p>` : ""}
       ${!e.status_karyawan ? `<p class="small muted" style="margin-top:8px;">⚠️ Status Karyawan (Bulanan/Harian) belum diatur di Data Karyawan, sehingga Gaji Pokok belum bisa dihitung.</p>` : ""}
+      ${(() => {
+        // Slip yang dibayar tidak bersama batch periodenya (ditahan lalu dirilis) diberi tanggal bayar.
+        const m = periodInfo ? slipMetaByUser[e.id] : null;
+        if (!m || m.pay_status !== "dibayar" || !m.paid_at) return "";
+        const tunda = m.held_at && !roleFlags.isKaryawan ? " (ditahan, dirilis kemudian)" : "";
+        return `<p class="small" style="margin-top:12px;"><strong>Dibayarkan pada:</strong> ${fmtDate(m.paid_at)}${tunda}</p>`;
+      })()}
       <p class="small muted" style="margin-top:16px;">Dicetak ${fmtDate(new Date())} — dihasilkan otomatis oleh sistem, tidak memerlukan tanda tangan basah.</p>
     </div>
   `;
