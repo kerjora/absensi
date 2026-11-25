@@ -331,6 +331,7 @@ async function loadAndRender() {
   const el = document.getElementById("slip-table");
   el.innerHTML = `<p class="muted">Memuat…</p>`;
   await loadData(period);
+  refreshPeriodLabels();
   renderLockBanner();
   renderSummary();
   renderToolbar();
@@ -1157,6 +1158,20 @@ function buildPeriodOptions(centerPeriod, cutoffD) {
     options.push({ value, label: `${fmtDate(start)} – ${fmtDate(end)}${frozen ? " 🔒" : ""}` });
   }
   return options;
+}
+
+// Perbarui label dropdown periode (ikon 🔒) setelah finalisasi / buka kunci,
+// tanpa menunggu halaman dimuat ulang.
+function refreshPeriodLabels() {
+  const sel = document.getElementById("filter-period");
+  if (!sel || sel.tagName !== "SELECT") return;
+  [...sel.options].forEach(o => {
+    const frozen = finalizedPeriods[o.value];
+    const { start, end } = frozen
+      ? { start: frozen.period_start, end: frozen.period_end }
+      : payrollPeriodRange(o.value, cutoffDay);
+    o.textContent = `${fmtDate(start)} – ${fmtDate(end)}${frozen ? " 🔒" : ""}`;
+  });
 }
 
 function periodLabel(p) {
