@@ -275,7 +275,7 @@ async function loadData(p) {
   const { start, end } = periodRange;
 
   const [{ data: emp, error: errEmp }, { data: levels }, { data: wages }, { data: salaries }, { data: att }, { data: ot }, { data: adj }, { data: rules }, { data: schedDays }, { data: types }, { data: alw }, { data: slips }, { data: locs }, { data: ovr }] = await Promise.all([
-    supabase.from("profiles").select("*").eq("is_active", true).order("full_name"),
+    supabase.from("profiles").select("*").order("full_name"), // termasuk nonaktif: yang resign di tengah/akhir periode tetap digaji (disaring di bawah)
     supabase.from("job_levels").select("*"),
     supabase.from("wage_history").select("*").lte("effective_date", end).order("effective_date", { ascending: false }),
     supabase.from("salary_history").select("*").lte("effective_date", end).order("effective_date", { ascending: false }),
@@ -293,7 +293,18 @@ async function loadData(p) {
 
   if (errEmp) { toast("Gagal memuat data karyawan: " + errEmp.message, "error"); }
 
-  employees = emp || []; // semua karyawan aktif, termasuk yg status/grade-nya belum diatur (biar admin tahu perlu dilengkapi)
+  employees = emp || []; // termasuk yg status/grade-nya belum diatur (biar admin tahu perlu dilengkapi)
+  // Karyawan NONAKTIF (resign) tetap masuk slip periode yang masih mencakup masa
+  // kerjanya: resign_date >= awal periode. Kalau resign_date belum diisi, dianggap
+  // masih relevan bila punya absensi di periode ini. Periode yang sudah
+  // difinalisasi memakai roster snapshot (lihat getSlipList).
+  const punyaAbsen = new Set((att || []).map(a => a.user_id));
+  employees = employees.filter(e => {
+    if (e.is_active) return true;
+    if (periodInfo) return true; // periode final: disaring lagi lewat snapshot di getSlipList
+    if (e.resign_date) return e.resign_date >= start;
+    return punyaAbsen.has(e.id);
+  });
   // Karyawan biasa hanya boleh lihat baris dirinya sendiri, walau query di
   // atas tidak difilter per user_id — RLS profiles sebenarnya sudah
   // otomatis membatasi ini di sisi database, filter di sini cuma jaga-jaga
