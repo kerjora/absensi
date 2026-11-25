@@ -50,11 +50,13 @@ export async function render(container) {
               <label>PPN (%) <input type="number" name="ppn_persen" min="0" step="0.01" value="0"></label>
               <label>PPh 23 (%) <input type="number" name="pph23_persen" min="0" step="0.01" value="0"></label>
             </div>
-            <div class="form-row" style="flex-direction:column; align-items:flex-start; gap:6px;">
-              <label class="checkbox-row"><input type="checkbox" name="bpjs_kes_ditagihkan"> Tagihkan BPJS Kesehatan bagian perusahaan</label>
-              <label class="checkbox-row"><input type="checkbox" name="bpjs_tk_ditagihkan"> Tagihkan BPJS Ketenagakerjaan bagian perusahaan</label>
+            <div class="form-row pt-rates">
+              <label>BPJS Kesehatan perusahaan (%) <input type="number" name="bpjs_kes_persen" min="0" step="0.01" value="0"></label>
+              <label>BPJS Ketenagakerjaan perusahaan (%) <input type="number" name="bpjs_tk_persen" min="0" step="0.01" value="0"></label>
+            </div>
+            <div class="form-row">
               <label class="checkbox-row"><input type="checkbox" name="fee_atas_bpjs"> Management fee dihitung dari gaji + BPJS perusahaan</label>
-              <span class="muted small">Nominal BPJS = upah lapor × % "Ditanggung Perusahaan" di Master Level, hanya untuk karyawan yang terdaftar BPJS-nya.</span>
+              <span class="muted small">BPJS perusahaan ditagihkan = upah lapor (Master Level) × persentase di atas, hanya untuk karyawan yang BPJS-nya terdaftar. Isi 0 bila tidak ditagihkan.</span>
             </div>
             <div class="form-row">
               <label>Rekening Bank <input name="bank_rekening" placeholder="Contoh: Bank Mandiri KCP Krian - No. Rek: 1410007515265"></label>
@@ -129,8 +131,8 @@ function openModal(existing = null) {
     form.fee_persen.value = existing.fee_persen ?? 0;
     form.ppn_persen.value = existing.ppn_persen ?? 0;
     form.pph23_persen.value = existing.pph23_persen ?? 0;
-    form.bpjs_kes_ditagihkan.checked = !!existing.bpjs_kes_ditagihkan;
-    form.bpjs_tk_ditagihkan.checked = !!existing.bpjs_tk_ditagihkan;
+    form.bpjs_kes_persen.value = existing.bpjs_kes_persen ?? 0;
+    form.bpjs_tk_persen.value = existing.bpjs_tk_persen ?? 0;
     form.fee_atas_bpjs.checked = !!existing.fee_atas_bpjs;
     form.bank_rekening.value = existing.bank_rekening || "";
     form.nama_penandatangan.value = existing.nama_penandatangan || "";
@@ -164,13 +166,13 @@ async function onSubmit(e) {
     fee_persen: Number(fd.get("fee_persen")) || 0,
     ppn_persen: Number(fd.get("ppn_persen")) || 0,
     pph23_persen: Number(fd.get("pph23_persen")) || 0,
-    bpjs_kes_ditagihkan: fd.get("bpjs_kes_ditagihkan") === "on",
-    bpjs_tk_ditagihkan: fd.get("bpjs_tk_ditagihkan") === "on",
+    bpjs_kes_persen: Number(fd.get("bpjs_kes_persen")) || 0,
+    bpjs_tk_persen: Number(fd.get("bpjs_tk_persen")) || 0,
     fee_atas_bpjs: fd.get("fee_atas_bpjs") === "on",
     bank_rekening: String(fd.get("bank_rekening") || "").trim() || null,
     nama_penandatangan: String(fd.get("nama_penandatangan") || "").trim() || null,
   };
-  if (payload.fee_persen < 0 || payload.ppn_persen < 0 || payload.pph23_persen < 0) { toast("Persentase tidak boleh negatif", "error"); return; }
+  if (payload.fee_persen < 0 || payload.ppn_persen < 0 || payload.pph23_persen < 0 || payload.bpjs_kes_persen < 0 || payload.bpjs_tk_persen < 0) { toast("Persentase tidak boleh negatif", "error"); return; }
   if (!payload.nama) { toast("Nama PT wajib diisi", "error"); return; }
 
   try {
@@ -190,7 +192,7 @@ async function onSubmit(e) {
     loadTable();
   } catch (err) {
     const dup = /duplicate|unique/i.test(err.message);
-    if (/bpjs_kes_ditagihkan|bpjs_tk_ditagihkan|fee_atas_bpjs/.test(err.message)) { toast("Jalankan SQL 028_master_pt_bpjs_invoice.sql di Supabase dulu, lalu simpan lagi.", "error"); return; }
+    if (/bpjs_kes_persen|bpjs_tk_persen|fee_atas_bpjs/.test(err.message)) { toast("Jalankan SQL 028 lalu 029_master_pt_bpjs_persen.sql di Supabase dulu, lalu simpan lagi.", "error"); return; }
     toast(dup ? "Nama PT itu sudah ada di daftar." : "Gagal menyimpan: " + err.message, "error");
   }
 }
