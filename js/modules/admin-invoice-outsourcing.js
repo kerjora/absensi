@@ -239,7 +239,7 @@ function cardHtml(a, i) {
     c.bpjsKes ? [`BPJS Kesehatan`, c.bpjsKes] : null,
     c.bpjsTk ? [`BPJS Ketenagakerjaan`, c.bpjsTk] : null,
     c.feeP ? [`Management fee ${pct(c.feeP)}%`, c.fee] : null,
-    c.ppnP ? [c.dppNilaiLain ? `PPN ${pct(c.ppnP)}% × DPP nilai lain (11/12 × fee = ${rupiahPlain(c.dppPpn)})` : `PPN ${pct(c.ppnP)}%`, c.ppn] : null,
+    c.ppnP ? [`PPN ${pct(c.ppnP)}%`, c.ppn] : null,
   ].filter(Boolean);
 
   return `
@@ -340,7 +340,7 @@ function invoiceHtml(a, draft) {
   if (c.bpjsKes) rows.push([`BPJS KESEHATAN`, c.bpjsKes]);
   if (c.bpjsTk) rows.push([`BPJS KETENAGAKERJAAN`, c.bpjsTk]);
   if (c.feeP) rows.push([`MANAGEMENT FEE ${pct(c.feeP)}%`, c.fee]);
-  if (c.ppnP) rows.push([c.dppNilaiLain ? `PPN ${pct(c.ppnP)}%<br><span style="font-size:0.85em;">DPP NILAI LAIN (11/12 × MANAGEMENT FEE) = ${rupiahPlain(c.dppPpn)}</span>` : `PPN ${pct(c.ppnP)}%`, c.ppn]);
+  if (c.ppnP) rows.push([`PPN ${pct(c.ppnP)}%`, c.ppn]);
 
   const bodyRows = rows.map((r, i) => `
     <tr><td class="c">${i + 1}</td><td>${r[0]}</td><td class="r">${rupiahPlain(r[1])}</td></tr>`).join("");
