@@ -1506,7 +1506,8 @@ button { font-family: 'Inter'; cursor: pointer; }
 .pt-invoice-fields { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px 4px; margin: 6px 0 12px; }
 .pt-invoice-fields legend { font-size: 0.8rem; font-weight: 600; padding: 0 6px; }
 .pt-invoice-fields.hidden { display: none; }
-.pt-rates { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.pt-rates { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.pt-rates input { min-width: 0; width: 100%; box-sizing: border-box; }
 @media (max-width: 520px) { .pt-rates { grid-template-columns: 1fr; } }
 
 .invoice-modal-box { max-width: 780px; }
