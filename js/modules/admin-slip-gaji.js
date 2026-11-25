@@ -134,6 +134,8 @@ let periodRange = { start: "", end: "" }; // rentang tanggal aktual (hasil cut-o
 let finalizedPeriods = {}; // { [period]: { period_start, period_end, cutoff_start_day, finalized_by, finalized_at } } — dimuat sekali saat render()
 let periodInfo = null; // baris payroll_periods utk periode yg SEDANG dibuka, atau null kalau masih draft
 let frozenSlipsByUser = {}; // { [userId]: snapshot } — dari payroll_slips, hanya terisi kalau periodInfo != null
+let slipMetaByUser = {}; // { [userId]: baris payroll_slips (pay_status, hold_reason, ...) } — hanya terisi kalau periodInfo != null
+let payReady = false; // false kalau SQL 026 belum dijalankan (kolom pay_status belum ada) -> fitur tahan/rilis disembunyikan
 let currentUser = null; // disimpan supaya bisa dipakai di onFinalize/onUnlock
 
 // Batasan akses berdasarkan role, dihitung sekali di awal render():
@@ -145,7 +147,7 @@ let currentUser = null; // disimpan supaya bisa dipakai di onFinalize/onUnlock
 //   sendiri (walau tabel profiles yang dibaca RLS-nya memang sudah
 //   otomatis cuma balikin baris sendiri utk role ini, filter ini jaga-jaga
 //   di sisi tampilan juga).
-let roleFlags = { isKaryawan: false, canFinalize: false, canEditAdjust: true };
+let roleFlags = { isKaryawan: false, canFinalize: false, canEditAdjust: true, canManagePay: false };
 
 export async function render(container, user, opts = {}) {
   currentUser = user;
@@ -160,6 +162,8 @@ export async function render(container, user, opts = {}) {
     isKaryawan: opts.forceSelfOnly || !STAFF_ROLES.includes(user.role),
     canFinalize: !opts.forceSelfOnly && user.role === "super_admin",
     canEditAdjust: !opts.forceSelfOnly && STAFF_ROLES.includes(user.role),
+    // Tahan/rilis gaji: Super Admin atau staff HR (server tetap memeriksa akses menu "slip-gaji").
+    canManagePay: !opts.forceSelfOnly && STAFF_ROLES.includes(user.role),
   };
   period = dateOnlyISO(new Date()).slice(0, 7);
   cutoffDay = await getPayrollCutoffDay();
@@ -196,6 +200,7 @@ export async function render(container, user, opts = {}) {
     </div>
 
     <div id="slip-lock-banner"></div>
+    <div id="slip-pending"></div>
     <div id="slip-summary" class="dash-stats"></div>
     <div id="slip-table" class="table-wrap"><p class="muted">Memuat…</p></div>
 
@@ -210,6 +215,27 @@ export async function render(container, user, opts = {}) {
           </div>
         </div>
         <div id="slip-content" class="slip-print-area"></div>
+      </div>
+    </div>
+
+    <!-- Modal: tahan / rilis gaji -->
+    <div id="modal-pay" class="modal hidden">
+      <div class="modal-box">
+        <h3 id="pay-title">Tahan Gaji</h3>
+        <p class="muted small" id="pay-emp-label" style="margin-top:-4px;"></p>
+        <form id="form-pay">
+          <div class="form-row" id="pay-row-reason">
+            <label>Alasan penahanan <textarea name="reason" rows="3" placeholder="Contoh: serah terima aset belum selesai"></textarea></label>
+          </div>
+          <div class="form-row two-col" id="pay-row-paid">
+            <label>Tanggal dibayar <input type="date" name="paid_at"></label>
+            <label>Catatan <input name="note" placeholder="Contoh: transfer BCA, ref 12345"></label>
+          </div>
+          <div class="modal-actions">
+            <button type="button" id="btn-cancel-pay" class="btn-secondary">Batal</button>
+            <button type="submit" class="btn-primary" id="btn-submit-pay">Simpan</button>
+          </div>
+        </form>
       </div>
     </div>
 
@@ -248,6 +274,8 @@ export async function render(container, user, opts = {}) {
   document.getElementById("btn-edit-adjust")?.addEventListener("click", () => openAdjustModal(currentSlip.emp.id));
   document.getElementById("btn-cancel-adjust").addEventListener("click", () => document.getElementById("modal-adjust").classList.add("hidden"));
   document.getElementById("form-adjust").addEventListener("submit", e => onSubmitAdjust(e, user));
+  document.getElementById("btn-cancel-pay").addEventListener("click", () => document.getElementById("modal-pay").classList.add("hidden"));
+  document.getElementById("form-pay").addEventListener("submit", onSubmitPay);
 
   await loadAndRender();
 }
@@ -260,6 +288,7 @@ async function loadAndRender() {
   renderLockBanner();
   renderSummary();
   renderTable();
+  renderPendingHolds(); // tidak ditunggu: daftar gaji tertunda dimuat terpisah
 }
 
 async function loadData(p) {
@@ -365,7 +394,11 @@ async function loadData(p) {
   (claimRows || []).forEach(c => { (claimByUser[c.user_id] ??= []).push(c); });
 
   frozenSlipsByUser = {};
-  (slips || []).forEach(s => { frozenSlipsByUser[s.user_id] = s.snapshot; });
+  slipMetaByUser = {};
+  (slips || []).forEach(s => { frozenSlipsByUser[s.user_id] = s.snapshot; slipMetaByUser[s.user_id] = s; });
+  // Kolom pay_status ada hanya kalau SQL 026 sudah dijalankan. Untuk periode draft
+  // (tidak ada baris slip) dianggap siap — kontrol tahan/rilis memang hanya untuk periode final.
+  payReady = !periodInfo || (slips || []).every(s => s.pay_status !== undefined);
 }
 
 // -----------------------------------------------------------------------
@@ -381,8 +414,11 @@ function getSlipList() {
     // saat difinalisasi (karyawan baru sesudahnya tidak ikut nongol di
     // periode lama; karyawan yang keluar setelahnya tetap tampil di sini).
     return employees
-      .map(e => frozenSlipsByUser[e.id])
-      .filter(Boolean);
+      .map(e => frozenSlipsByUser[e.id] && { ...frozenSlipsByUser[e.id], pay: slipMetaByUser[e.id] })
+      .filter(Boolean)
+      // Slip yang ditahan tidak boleh tampil di tampilan "slip saya" (RLS sudah menyembunyikannya
+      // untuk Karyawan biasa; filter ini menutup kasus staff yang membuka menu Slip Gaji Saya).
+      .filter(x => !(roleFlags.isKaryawan && x.pay?.pay_status === "ditahan"));
   }
   return employees.map(computeSlip);
 }
@@ -461,9 +497,14 @@ async function onFinalize() {
 
 async function onUnlock() {
   if (!roleFlags.canFinalize) { toast("Hanya Super Admin yang bisa membuka kunci periode.", "error"); return; }
+  const metas = Object.values(slipMetaByUser);
+  const nDibayar = metas.filter(m => m.pay_status === "dibayar").length;
+  const nDitahan = metas.filter(m => m.pay_status === "ditahan").length;
+  if (nDibayar) { toast(`Tidak bisa buka kunci: ${nDibayar} slip sudah ditandai dibayar. Batalkan status dibayarnya dulu.`, "error"); return; }
   const ok = await confirmDialog({
     title: `Buka kunci periode ${periodLabel(period)}?`,
-    message: "Slip yang sudah dibekukan akan dihapus dan periode ini kembali ke mode draft (dihitung live). Angka bisa jadi berbeda dari yang tadinya sudah dicetak, sampai difinalisasi ulang.",
+    message: "Slip yang sudah dibekukan akan dihapus dan periode ini kembali ke mode draft (dihitung live). Angka bisa jadi berbeda dari yang tadinya sudah dicetak, sampai difinalisasi ulang." +
+      (nDitahan ? ` Perhatian: ${nDitahan} slip yang sedang ditahan akan kehilangan status tahannya.` : ""),
     confirmLabel: "Buka Kunci",
     confirmClass: "btn-outline-danger",
   });
@@ -584,7 +625,7 @@ function renderSummary() {
   const svg = paths => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
   el.innerHTML = `
     <div class="dash-stat">
-      <div class="dash-stat-top"><span class="dash-stat-icon">${svg('<path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/>')}</span><span class="dash-stat-label">Karyawan Aktif</span></div>
+      <div class="dash-stat-top"><span class="dash-stat-icon">${svg('<path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/>')}</span><span class="dash-stat-label">Karyawan</span></div>
       <div class="dash-stat-value">${slips.length}</div>
     </div>
     <div class="dash-stat ok">
@@ -595,6 +636,19 @@ function renderSummary() {
       <div class="dash-stat-top"><span class="dash-stat-icon">${svg('<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>')}</span><span class="dash-stat-label">Total Jam Lembur</span></div>
       <div class="dash-stat-value">${fmtJam(totalLembur)}</div>
     </div>
+    ${(periodInfo && payReady) ? (() => {
+      const sum = st => slips.filter(x => (x.pay?.pay_status || "siap") === st).reduce((a, x) => a + x.gajiBersih, 0);
+      const cnt = st => slips.filter(x => (x.pay?.pay_status || "siap") === st).length;
+      return `
+    <div class="dash-stat ok">
+      <div class="dash-stat-top"><span class="dash-stat-icon">${svg('<path d="M20 6L9 17l-5-5"/>')}</span><span class="dash-stat-label">Sudah Dibayar (${cnt("dibayar")})</span></div>
+      <div class="dash-stat-value dash-stat-value-sm">${fmtRupiah(sum("dibayar"))}</div>
+    </div>
+    ${cnt("ditahan") ? `<div class="dash-stat warn">
+      <div class="dash-stat-top"><span class="dash-stat-icon">${svg('<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/>')}</span><span class="dash-stat-label">Ditahan (${cnt("ditahan")})</span></div>
+      <div class="dash-stat-value dash-stat-value-sm">${fmtRupiah(sum("ditahan"))}</div>
+    </div>` : ""}`;
+    })() : ""}
     ${belumDiatur ? `
     <div class="dash-stat warn">
       <div class="dash-stat-top"><span class="dash-stat-icon">${svg('<path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/>')}</span><span class="dash-stat-label">Status Karyawan Belum Diatur</span></div>
@@ -608,7 +662,7 @@ function renderTable() {
   const slips = getSlipList();
   // Kartu slip Karyawan tidak dibungkus .table-wrap (supaya tidak dobel border).
   el.classList.toggle("table-wrap", !(roleFlags.isKaryawan && slips.length === 1));
-  if (!slips.length) { el.innerHTML = `<p class="muted">${periodInfo ? "Tidak ada slip yang difinalisasi untuk periode ini." : "Belum ada data karyawan aktif."}</p>`; return; }
+  if (!slips.length) { el.innerHTML = `<p class="muted">${periodInfo ? (roleFlags.isKaryawan ? "Slip gaji periode ini belum tersedia. Hubungi HR/Admin jika perlu." : "Tidak ada slip yang difinalisasi untuk periode ini.") : "Belum ada data karyawan aktif."}</p>`; return; }
 
   // Tampilan Karyawan (1 slip = dirinya sendiri): kartu ringkasan, bukan
   // tabel satu baris. Tombol tetap memakai class .btn-detail supaya handler
@@ -641,13 +695,14 @@ function renderTable() {
     return;
   }
 
+  const showPay = !!(periodInfo && payReady && !roleFlags.isKaryawan);
   el.innerHTML = `
     <table class="table">
       <thead>
         <tr>
           <th>Nama</th><th>Grade</th><th>Status</th>
           <th>Hadir / Telat</th><th>Lembur</th>
-          <th>Gaji Pokok</th><th>Gaji Bersih</th><th></th>
+          <th>Gaji Pokok</th><th>Gaji Bersih</th>${showPay ? "<th>Pembayaran</th>" : ""}<th></th>
         </tr>
       </thead>
       <tbody>
@@ -662,6 +717,7 @@ function renderTable() {
             <td>${fmtJam(s.jamLemburBiasa + s.jamLemburLibur)}</td>
             <td>${fmtRupiah(s.gajiPokok)}</td>
             <td><strong>${fmtRupiah(s.gajiBersih)}</strong></td>
+            ${showPay ? `<td>${payCellHtml(s)}</td>` : ""}
             <td><button class="btn-link btn-detail" data-id="${s.emp.id}">Detail &amp; Cetak</button></td>
           </tr>
         `).join("")}
@@ -672,6 +728,112 @@ function renderTable() {
   el.querySelectorAll(".btn-detail").forEach(btn => {
     btn.addEventListener("click", () => openSlipModal(btn.dataset.id));
   });
+  el.querySelectorAll(".btn-pay").forEach(btn => {
+    btn.addEventListener("click", () => openPayModal(period, btn.dataset.id, btn.dataset.act, btn.dataset.name));
+  });
+}
+
+// -----------------------------------------------------------------------
+// TAHAN / RILIS GAJI (SQL 026)
+// -----------------------------------------------------------------------
+function payCellHtml(s) {
+  const st = s.pay?.pay_status || "siap";
+  const id = s.emp.id, nm = escapeHtml(s.emp.full_name);
+  const btn = (act, label, cls = "btn-link") => `<button class="${cls} btn-pay" data-act="${act}" data-id="${id}" data-name="${nm}">${label}</button>`;
+  if (st === "ditahan") {
+    return `<span class="badge badge-warn" title="${escapeHtml(s.pay?.hold_reason || "")}">Ditahan</span>
+      <div class="small muted">${escapeHtml(s.pay?.hold_reason || "")}</div>
+      ${roleFlags.canManagePay ? `<div>${btn("bayar", "Rilis")} · ${btn("lepas", "Lepas tahan")}</div>` : ""}`;
+  }
+  if (st === "dibayar") {
+    return `<span class="badge badge-ok">Dibayar</span>
+      <div class="small muted">${s.pay?.paid_at ? fmtDate(s.pay.paid_at) : ""}${s.pay?.pay_note ? " · " + escapeHtml(s.pay.pay_note) : ""}</div>
+      ${roleFlags.canFinalize ? `<div>${btn("batal_bayar", "Batalkan")}</div>` : ""}`;
+  }
+  return `<span class="badge badge-muted">Siap</span>
+    ${roleFlags.canManagePay ? `<div>${btn("tahan", "Tahan")} · ${btn("bayar", "Tandai dibayar")}</div>` : ""}`;
+}
+
+let payCtx = null; // { period, userId, action }
+
+async function openPayModal(per, userId, action, name) {
+  payCtx = { period: per, userId, action };
+  const form = document.getElementById("form-pay");
+  form.reset();
+  const titles = { tahan: "Tahan Gaji", bayar: "Rilis / Tandai Dibayar", lepas: "Lepas Tahan", batal_bayar: "Batalkan Status Dibayar" };
+  document.getElementById("pay-title").textContent = titles[action] || "Status Pembayaran";
+  document.getElementById("pay-emp-label").textContent = `${name || ""} — periode ${periodLabel(per)}`;
+  document.getElementById("pay-row-reason").classList.toggle("hidden", action !== "tahan");
+  document.getElementById("pay-row-paid").classList.toggle("hidden", action !== "bayar");
+  if (action === "bayar") form.elements.paid_at.value = dateOnlyISO(new Date());
+  document.getElementById("btn-submit-pay").textContent = { tahan: "Tahan", bayar: "Rilis", lepas: "Lepas tahan", batal_bayar: "Batalkan status" }[action] || "Simpan";
+  document.getElementById("modal-pay").classList.remove("hidden");
+}
+
+async function onSubmitPay(e) {
+  e.preventDefault();
+  if (!payCtx) return;
+  const fd = new FormData(e.target);
+  const { period: per, userId, action } = payCtx;
+  if (action === "tahan" && !String(fd.get("reason") || "").trim()) { toast("Alasan penahanan wajib diisi", "error"); return; }
+  const { error } = await supabase.rpc("set_slip_pay_status", {
+    p_period: per, p_user: userId, p_action: action,
+    p_reason: fd.get("reason") || null,
+    p_paid_at: fd.get("paid_at") || null,
+    p_note: fd.get("note") || null,
+  });
+  if (error) { toast("Gagal: " + error.message, "error"); return; }
+  document.getElementById("modal-pay").classList.add("hidden");
+  toast({ tahan: "Gaji ditahan", bayar: "Gaji dirilis / ditandai dibayar", lepas: "Penahanan dilepas", batal_bayar: "Status dibayar dibatalkan" }[action] || "Tersimpan", "success");
+  payCtx = null;
+  await loadAndRender();
+}
+
+// Daftar gaji yang masih ditahan di periode LAIN (mis. gaji periode sebelumnya
+// yang belum dirilis), supaya tidak terlupa. Hanya untuk staff.
+async function renderPendingHolds() {
+  const el = document.getElementById("slip-pending");
+  if (!el) return;
+  el.innerHTML = "";
+  if (roleFlags.isKaryawan || !roleFlags.canManagePay) return;
+  const myPeriod = period;
+  const { data, error } = await supabase.from("payroll_slips")
+    .select("period, user_id, gaji_bersih, hold_reason, held_at, nama:snapshot->emp->>full_name")
+    .eq("pay_status", "ditahan").neq("period", period).order("period", { ascending: false });
+  if (error || !data?.length) return; // kolom belum ada (SQL 026 belum dijalankan) atau tidak ada yang tertunda
+  if (myPeriod !== period) return; // pengguna sudah pindah periode saat query berjalan
+  el.innerHTML = `
+    <div class="pg-banner pg-banner-warn" style="flex-direction:column; align-items:stretch; gap:8px;">
+      <div class="pg-banner-text"><strong>⏸ Gaji ditahan di periode lain (${data.length})</strong>
+        <span>Belum dirilis. Buka periodenya untuk merilis atau melepas tahan.</span></div>
+      <table class="table" style="margin:0;">
+        <tbody>
+          ${data.map(r => `
+            <tr>
+              <td>${escapeHtml(r.nama || "—")}</td>
+              <td>${escapeHtml(periodLabelFor(r.period))}</td>
+              <td><strong>${fmtRupiah(r.gaji_bersih)}</strong></td>
+              <td class="small muted">${escapeHtml(r.hold_reason || "")}</td>
+              <td><button class="btn-link btn-goto" data-period="${r.period}">Buka periode</button></td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+  el.querySelectorAll(".btn-goto").forEach(btn => btn.addEventListener("click", () => {
+    const sel = document.getElementById("filter-period");
+    const val = btn.dataset.period;
+    if (sel.tagName === "SELECT" && ![...sel.options].some(o => o.value === val)) {
+      sel.add(new Option(periodLabelFor(val), val));
+    }
+    sel.value = val;
+    period = val;
+    loadAndRender();
+  }));
+}
+
+function periodLabelFor(p) {
+  const f = finalizedPeriods[p];
+  return f ? `${fmtDate(f.period_start)} – ${fmtDate(f.period_end)}` : p;
 }
 
 // -----------------------------------------------------------------------
@@ -866,6 +1028,11 @@ function doExport() {
     "Total Potongan": s.totalPotongan,
     "Reimbursement": s.reimbursement || 0,
     "Gaji Bersih": s.gajiBersih,
+    ...(periodInfo && payReady ? {
+      "Status Pembayaran": { siap: "Siap", ditahan: "Ditahan", dibayar: "Dibayar" }[s.pay?.pay_status || "siap"],
+      "Tanggal Dibayar": s.pay?.paid_at || "",
+      "Keterangan": s.pay?.pay_status === "ditahan" ? (s.pay?.hold_reason || "") : (s.pay?.pay_note || ""),
+    } : {}),
   }));
   exportXLSX(`slip-gaji-ringkasan-${period}.xlsx`, rows, "Slip Gaji");
 }
