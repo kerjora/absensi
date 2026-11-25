@@ -50,6 +50,10 @@ export async function render(container) {
               <label>PPN (%) <input type="number" name="ppn_persen" min="0" step="0.01" value="0"></label>
               <label>PPh 23 (%) <input type="number" name="pph23_persen" min="0" step="0.01" value="0"></label>
             </div>
+            <div class="form-row">
+              <label class="checkbox-row"><input type="checkbox" name="ppn_dpp_nilai_lain"> PPN dihitung atas DPP nilai lain (11/12)</label>
+              <span class="muted small">Isi PPN 12 lalu centang ini: PPN = 12% × (11/12 × management fee), efektif 11%. Tanpa centang, PPN dikali penuh dari management fee.</span>
+            </div>
             <div class="form-row pt-rates">
               <label>BPJS Kesehatan perusahaan (%) <input type="number" name="bpjs_kes_persen" min="0" step="0.01" value="0"></label>
               <label>BPJS Ketenagakerjaan perusahaan (%) <input type="number" name="bpjs_tk_persen" min="0" step="0.01" value="0"></label>
@@ -131,6 +135,7 @@ function openModal(existing = null) {
     form.fee_persen.value = existing.fee_persen ?? 0;
     form.ppn_persen.value = existing.ppn_persen ?? 0;
     form.pph23_persen.value = existing.pph23_persen ?? 0;
+    form.ppn_dpp_nilai_lain.checked = !!existing.ppn_dpp_nilai_lain;
     form.bpjs_kes_persen.value = existing.bpjs_kes_persen ?? 0;
     form.bpjs_tk_persen.value = existing.bpjs_tk_persen ?? 0;
     form.fee_atas_bpjs.checked = !!existing.fee_atas_bpjs;
@@ -166,6 +171,7 @@ async function onSubmit(e) {
     fee_persen: Number(fd.get("fee_persen")) || 0,
     ppn_persen: Number(fd.get("ppn_persen")) || 0,
     pph23_persen: Number(fd.get("pph23_persen")) || 0,
+    ppn_dpp_nilai_lain: fd.get("ppn_dpp_nilai_lain") === "on",
     bpjs_kes_persen: Number(fd.get("bpjs_kes_persen")) || 0,
     bpjs_tk_persen: Number(fd.get("bpjs_tk_persen")) || 0,
     fee_atas_bpjs: fd.get("fee_atas_bpjs") === "on",
@@ -192,7 +198,7 @@ async function onSubmit(e) {
     loadTable();
   } catch (err) {
     const dup = /duplicate|unique/i.test(err.message);
-    if (/bpjs_kes_persen|bpjs_tk_persen|fee_atas_bpjs/.test(err.message)) { toast("Jalankan SQL 028 lalu 029_master_pt_bpjs_persen.sql di Supabase dulu, lalu simpan lagi.", "error"); return; }
+    if (/bpjs_kes_persen|bpjs_tk_persen|fee_atas_bpjs|ppn_dpp_nilai_lain/.test(err.message)) { toast("Jalankan SQL 028, 029, lalu 030_master_pt_ppn_dpp_nilai_lain.sql di Supabase dulu, lalu simpan lagi.", "error"); return; }
     toast(dup ? "Nama PT itu sudah ada di daftar." : "Gagal menyimpan: " + err.message, "error");
   }
 }
