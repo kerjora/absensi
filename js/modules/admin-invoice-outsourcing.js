@@ -233,8 +233,8 @@ function cardHtml(a, i) {
 
   const lines = [
     [`Total gaji karyawan`, c.gaji],
-    c.bpjsKes ? [`BPJS Kesehatan ${pct(c.bpjsKesP)}% (ditanggung perusahaan)`, c.bpjsKes] : null,
-    c.bpjsTk ? [`BPJS Ketenagakerjaan ${pct(c.bpjsTkP)}% (ditanggung perusahaan)`, c.bpjsTk] : null,
+    c.bpjsKes ? [`BPJS Kesehatan`, c.bpjsKes] : null,
+    c.bpjsTk ? [`BPJS Ketenagakerjaan`, c.bpjsTk] : null,
     c.feeP ? [`Management fee ${pct(c.feeP)}%`, c.fee] : null,
     c.ppnP ? [`PPN ${pct(c.ppnP)}%`, c.ppn] : null,
   ].filter(Boolean);
@@ -334,8 +334,8 @@ function invoiceHtml(a, draft) {
   const cfg = c.cfg;
   const rows = [];
   rows.push([`TOTAL GAJI KARYAWAN<br>PERIODE ${escapeHtml(fmtRangeUpper(periodInfo.period_start, periodInfo.period_end))}`, c.gaji]);
-  if (c.bpjsKes) rows.push([`BPJS KESEHATAN ${pct(c.bpjsKesP)}% (DITANGGUNG PERUSAHAAN)`, c.bpjsKes]);
-  if (c.bpjsTk) rows.push([`BPJS KETENAGAKERJAAN ${pct(c.bpjsTkP)}% (DITANGGUNG PERUSAHAAN)`, c.bpjsTk]);
+  if (c.bpjsKes) rows.push([`BPJS KESEHATAN`, c.bpjsKes]);
+  if (c.bpjsTk) rows.push([`BPJS KETENAGAKERJAAN`, c.bpjsTk]);
   if (c.feeP) rows.push([`MANAGEMENT FEE ${pct(c.feeP)}%`, c.fee]);
   if (c.ppnP) rows.push([`PPN ${pct(c.ppnP)}%`, c.ppn]);
 
