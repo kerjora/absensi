@@ -594,17 +594,35 @@ async function onFinalize() {
 async function onUnlock() {
   if (!roleFlags.canFinalize) { toast("Hanya Super Admin yang bisa membuka kunci periode.", "error"); return; }
   const metas = Object.values(slipMetaByUser);
-  const nDibayar = metas.filter(m => m.pay_status === "dibayar").length;
+  const dibayarItems = metas.filter(m => m.pay_status === "dibayar").map(m => ({ period, userId: m.user_id }));
+  const nDibayar = dibayarItems.length;
   const nDitahan = metas.filter(m => m.pay_status === "ditahan").length;
-  if (nDibayar) { toast(`Tidak bisa buka kunci: ${nDibayar} slip sudah ditandai dibayar. Batalkan status dibayarnya dulu.`, "error"); return; }
-  const ok = await confirmDialog({
-    title: `Buka kunci periode ${periodLabel(period)}?`,
-    message: "Slip yang sudah dibekukan akan dihapus dan periode ini kembali ke mode draft (dihitung live). Angka bisa jadi berbeda dari yang tadinya sudah dicetak, sampai difinalisasi ulang." +
-      (nDitahan ? ` Perhatian: ${nDitahan} slip yang sedang ditahan akan kehilangan status tahannya.` : ""),
-    confirmLabel: "Buka Kunci",
-    confirmClass: "btn-outline-danger",
-  });
-  if (!ok) return;
+  if (nDibayar) {
+    // Periode yang sudah dibayar tidak boleh dibuka begitu saja: batalkan SEMUA status dibayar lebih dulu (massal).
+    const okBatal = await confirmDialog({
+      title: `Batalkan status dibayar lalu buka kunci?`,
+      message: `${nDibayar} slip periode ${periodLabel(period)} sudah ditandai dibayar. Untuk membuka kunci, semua status dibayar dibatalkan dulu (tanggal & catatan pembayarannya hilang), lalu periode kembali ke draft dan slipnya dihapus.` +
+        (nDitahan ? ` ${nDitahan} slip yang ditahan juga kehilangan status tahannya.` : "") + " Lanjutkan hanya kalau pembayarannya memang dibatalkan.",
+      confirmLabel: "Batalkan & Buka Kunci",
+      confirmClass: "btn-outline-danger",
+    });
+    if (!okBatal) return;
+    const res = await applyPayAction(dibayarItems, "batal_bayar", {});
+    if (res.failed || res.updated < nDibayar) {
+      toast(`Pembatalan status dibayar belum tuntas (${res.updated}/${nDibayar}): ${res.firstError || "sebagian slip tidak berubah"}. Kunci tidak dibuka.`, "error");
+      await loadAndRender();
+      return;
+    }
+  } else {
+    const ok = await confirmDialog({
+      title: `Buka kunci periode ${periodLabel(period)}?`,
+      message: "Slip yang sudah dibekukan akan dihapus dan periode ini kembali ke mode draft (dihitung live). Angka bisa jadi berbeda dari yang tadinya sudah dicetak, sampai difinalisasi ulang." +
+        (nDitahan ? ` Perhatian: ${nDitahan} slip yang sedang ditahan akan kehilangan status tahannya.` : ""),
+      confirmLabel: "Buka Kunci",
+      confirmClass: "btn-outline-danger",
+    });
+    if (!ok) return;
+  }
 
   const { error } = await supabase.from("payroll_periods").delete().eq("period", period);
   if (error) { toast("Gagal membuka kunci: " + error.message, "error"); return; }
@@ -939,13 +957,15 @@ function renderBulkBar() {
       ${bayarItems.length ? `<button type="button" class="btn-primary" id="bk-bayar">Tandai dibayar (${bayarItems.length})</button>` : ""}
       ${siap.length ? `<button type="button" class="btn-secondary" id="bk-tahan">Tahan (${siap.length})</button>` : ""}
       ${ditahan.length ? `<button type="button" class="btn-secondary" id="bk-lepas">Lepas tahan (${ditahan.length})</button>` : ""}
-      ${dibayar.length ? `<span class="small muted">${dibayar.length} sudah dibayar (dilewati)</span>` : ""}
+      ${(dibayar.length && roleFlags.canFinalize) ? `<button type="button" class="btn-secondary" id="bk-batal">Batalkan status dibayar (${dibayar.length})</button>` : ""}
+      ${(dibayar.length && !roleFlags.canFinalize) ? `<span class="small muted">${dibayar.length} sudah dibayar (dilewati)</span>` : ""}
       <button type="button" class="btn-link" id="bk-clear">Batal pilihan</button>
     </div>`;
   const label = `${chosen.length} karyawan — periode ${periodLabel(period)}`;
   document.getElementById("bk-bayar")?.addEventListener("click", () => openPayModal("bayar", bayarItems, label));
   document.getElementById("bk-tahan")?.addEventListener("click", () => openPayModal("tahan", siap, label));
   document.getElementById("bk-lepas")?.addEventListener("click", () => openPayModal("lepas", ditahan, label));
+  document.getElementById("bk-batal")?.addEventListener("click", () => openPayModal("batal_bayar", dibayar, label));
   document.getElementById("bk-clear").addEventListener("click", () => { viewState.selected = new Set(); renderTable(); });
 }
 
@@ -1022,6 +1042,44 @@ function openPayModal(action, items, label) {
   document.getElementById("modal-pay").classList.remove("hidden");
 }
 
+// Terapkan satu aksi ke banyak slip. Memakai fungsi massal di server (SQL 027, 1 panggilan);
+// kalau 027 belum dijalankan, jatuh ke panggilan per slip (lebih lambat tapi hasilnya sama).
+// Mengembalikan { updated, skipped, failed, firstError }.
+let bulkAvailable = null; // null = belum dicoba
+const isMissingFn = err => !!err && (err.code === "PGRST202" || err.code === "42883" || /could not find the function|does not exist/i.test(err.message || ""));
+
+async function applyPayAction(items, action, { reason = null, paidAt = null, note = null } = {}, onProgress = () => {}) {
+  if (bulkAvailable !== false) {
+    let updated = 0, skipped = 0, failed = 0, firstError = "";
+    for (let i = 0; i < items.length; i += 1000) {
+      const chunk = items.slice(i, i + 1000).map(it => ({ period: it.period, user_id: it.userId }));
+      const { data, error } = await supabase.rpc("set_slip_pay_status_bulk", {
+        p_items: chunk, p_action: action, p_reason: reason, p_paid_at: paidAt, p_note: note,
+      });
+      if (error) {
+        if (i === 0 && isMissingFn(error)) { bulkAvailable = false; break; }
+        failed += chunk.length; firstError ||= error.message;
+        continue;
+      }
+      bulkAvailable = true;
+      updated += data?.updated || 0; skipped += data?.skipped || 0;
+      onProgress(Math.min(items.length, i + chunk.length));
+    }
+    if (bulkAvailable !== false) return { updated, skipped, failed, firstError };
+  }
+  // Cadangan: satu panggilan per slip dengan paralelisme terbatas.
+  let done = 0;
+  const results = await runPool(items, 6, async it => {
+    const res = await supabase.rpc("set_slip_pay_status", {
+      p_period: it.period, p_user: it.userId, p_action: action, p_reason: reason, p_paid_at: paidAt, p_note: note,
+    });
+    onProgress(++done);
+    return res;
+  });
+  const bad = results.filter(r => r?.error);
+  return { updated: results.length - bad.length, skipped: 0, failed: bad.length, firstError: bad[0]?.error?.message || "" };
+}
+
 // Jalankan fungsi async untuk banyak item dengan paralelisme terbatas.
 async function runPool(items, limit, fn) {
   const results = new Array(items.length);
@@ -1046,26 +1104,16 @@ async function onSubmitPay(e) {
   btn.disabled = true;
   const label = btn.textContent;
   btn.textContent = items.length > 1 ? `Memproses 0/${items.length}…` : "Memproses…";
-  let done = 0;
-  const results = await runPool(items, 6, async it => {
-    const res = await supabase.rpc("set_slip_pay_status", {
-      p_period: it.period, p_user: it.userId, p_action: action,
-      p_reason: fd.get("reason") || null,
-      p_paid_at: fd.get("paid_at") || null,
-      p_note: fd.get("note") || null,
-    });
-    done++;
-    if (items.length > 1) btn.textContent = `Memproses ${done}/${items.length}…`;
-    return res;
-  });
-  const failed = results.filter(r => r?.error);
-  const okCount = results.length - failed.length;
+  const res = await applyPayAction(items, action, {
+    reason: fd.get("reason") || null, paidAt: fd.get("paid_at") || null, note: fd.get("note") || null,
+  }, n => { if (items.length > 1) btn.textContent = `Memproses ${n}/${items.length}…`; });
   btn.textContent = label;
   const msg = { tahan: "ditahan", bayar: "dirilis / ditandai dibayar", lepas: "dilepas dari tahanan", batal_bayar: "dibatalkan status dibayarnya" }[action];
-  if (failed.length) {
-    toast(`${okCount} slip berhasil, ${failed.length} gagal: ${failed[0].error.message}`, "error");
+  if (res.failed) {
+    toast(`${res.updated} slip berhasil, ${res.failed} gagal: ${res.firstError}`, "error");
   } else {
-    toast(items.length > 1 ? `${okCount} slip ${msg}` : `Slip ${msg}`, "success");
+    const lewat = res.skipped ? `, ${res.skipped} dilewati (status tidak sesuai)` : "";
+    toast(items.length > 1 ? `${res.updated} slip ${msg}${lewat}` : (res.updated ? `Slip ${msg}` : "Tidak ada yang berubah (status slip tidak sesuai)"), res.updated ? "success" : "error");
   }
   payCtx = null;
   viewState.selected = new Set(); pendingSel = new Set();
