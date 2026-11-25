@@ -78,9 +78,8 @@ async function load() {
 
   const [{ data: emps, error: empErr }, { data: pInfo }, { data: pts }] = await Promise.all([
     supabase.from("profiles")
-      .select("id, full_name, employee_code, position, department, bagian, unit_pt, lokasi_kerja")
-      .eq("jenis_hubungan_kerja", "outsourcing")
-      .eq("is_active", true)
+      .select("id, full_name, employee_code, position, department, bagian, unit_pt, lokasi_kerja, is_active")
+      .eq("jenis_hubungan_kerja", "outsourcing") // termasuk nonaktif/resign: kalau masih punya slip final yang dirilis di periode ini, tetap ditagihkan
       .order("full_name"),
     supabase.from("payroll_periods").select("*").eq("period", period).maybeSingle(),
     supabase.from("master_pt").select("*"),
@@ -89,6 +88,8 @@ async function load() {
   if (empErr) { content.innerHTML = `<p class="muted">Gagal memuat data: ${empErr.message}</p>`; return; }
   employees = emps || [];
   periodInfo = pInfo || null;
+  // Periode belum final: roster = karyawan aktif saja (belum ada angka resmi, tidak ada tagihan).
+  if (!periodInfo) employees = employees.filter(e => e.is_active);
   vendorCfg = {};
   (pts || []).forEach(p => { vendorCfg[p.nama] = p; });
 
@@ -114,12 +115,25 @@ async function load() {
 
   const userIds = employees.map(e => e.id);
   const [{ data: slips }, { data: saved }] = await Promise.all([
-    supabase.from("payroll_slips").select("user_id, snapshot").eq("period", period).in("user_id", userIds),
+    supabase.from("payroll_slips").select("*").eq("period", period).in("user_id", userIds),
     supabase.from("outsourcing_area_invoices").select("*").eq("period", period),
   ]);
 
+  // Roster periode final = yang punya slip beku DAN gajinya dirilis (bukan "ditahan").
+  // Karyawan yang sudah resign tetap masuk selama slip periode ini ada & dirilis;
+  // Slip yang masih ditahan tidak ditagihkan di periode ini.
+  const slipRows = (slips || []).filter(r => r.pay_status !== "ditahan");
+  const ikut = new Set(slipRows.map(r => r.user_id));
+  employees = employees.filter(e => ikut.has(e.id));
+  if (!employees.length) {
+    slipByUser = {}; savedByKey = {}; areas = [];
+    content.innerHTML = `<p class="muted">Tidak ada slip outsourcing yang dirilis pada periode ini.</p>`;
+    renderStatus();
+    return;
+  }
+
   slipByUser = {};
-  (slips || []).forEach(s => { slipByUser[s.user_id] = s.snapshot?.totalPendapatan ?? 0; });
+  slipRows.forEach(s => { slipByUser[s.user_id] = s.snapshot?.totalPendapatan ?? 0; });
   savedByKey = {};
   (saved || []).forEach(r => { savedByKey[keyOf(r.vendor, r.area)] = r; });
 
