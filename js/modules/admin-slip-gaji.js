@@ -171,7 +171,6 @@ function injectSlipStyle() {
 }
 
 let slipMetaByUser = {}; // { [userId]: baris payroll_slips (pay_status, hold_reason, ...) } — hanya terisi kalau periodInfo != null
-let payEditOn = false; // periode final: menu pembayaran (⋯, massal, tandai semua) terkunci sampai "Edit Pembayaran" dibuka; reset tiap ganti periode
 let payReady = false; // false kalau SQL 026 belum dijalankan (kolom pay_status belum ada) -> fitur tahan/rilis disembunyikan
 let currentUser = null; // disimpan supaya bisa dipakai di onFinalize/onUnlock
 
@@ -329,7 +328,6 @@ export async function render(container, user, opts = {}) {
 
   document.getElementById("filter-period").addEventListener("change", e => {
     period = e.target.value;
-    payEditOn = false;
     viewState.status = "semua"; viewState.page = 1; viewState.selected = new Set();
     loadAndRender();
   });
@@ -512,17 +510,11 @@ function renderLockBanner() {
           <span>Difinalisasi oleh ${namaPenetap} pada ${fmtDate(periodInfo.finalized_at)}. Nilai di bawah dibekukan, tidak berubah walau pengaturan cut-off/tarif berubah lagi nanti.</span>
         </div>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          ${(payReady && roleFlags.canManagePay) ? `<button id="btn-pay-edit" class="btn-secondary">${payEditOn ? "🔒 Kunci Pembayaran" : "✏️ Edit Pembayaran"}</button>` : ""}
-          ${(payReady && roleFlags.canManagePay && payEditOn && siapItems().length) ? `<button id="btn-pay-all" class="btn-primary">💸 Tandai semua dibayar (${siapItems().length})</button>` : ""}
+          ${(payReady && roleFlags.canManagePay && siapItems().length) ? `<button id="btn-pay-all" class="btn-primary">💸 Tandai semua dibayar (${siapItems().length})</button>` : ""}
           ${roleFlags.canFinalize ? `<button id="btn-unlock-period" class="btn-secondary">🔓 Buka Kunci</button>` : ""}
         </div>
       </div>`;
     document.getElementById("btn-unlock-period")?.addEventListener("click", onUnlock);
-    document.getElementById("btn-pay-edit")?.addEventListener("click", () => {
-      payEditOn = !payEditOn;
-      if (!payEditOn) { closeRowMenu(); viewState.selected = new Set(); }
-      renderLockBanner(); renderTable(); renderBulkBar();
-    });
     document.getElementById("btn-pay-all")?.addEventListener("click", () => {
       const items = siapItems();
       const nTahan = Object.values(slipMetaByUser).filter(m => m.pay_status === "ditahan").length;
@@ -636,7 +628,6 @@ async function onUnlock() {
   if (error) { toast("Gagal membuka kunci: " + error.message, "error"); return; }
 
   delete finalizedPeriods[period];
-  payEditOn = false;
   toast("Periode dibuka kunci, kembali ke mode draft", "success");
   await loadAndRender();
 }
@@ -954,7 +945,7 @@ function renderPager(total, pages, from, shown) {
 function renderBulkBar() {
   const el = document.getElementById("slip-bulkbar");
   if (!el) return;
-  const usePay = !!(periodInfo && payEditOn && payReady && !roleFlags.isKaryawan && roleFlags.canManagePay);
+  const usePay = !!(periodInfo && payReady && !roleFlags.isKaryawan && roleFlags.canManagePay);
   if (!usePay || !viewState.selected.size) { el.innerHTML = ""; return; }
   const chosen = getSlipList().filter(s => viewState.selected.has(s.emp.id));
   const by = st => chosen.filter(s => payStatusOf(s) === st).map(s => ({ period, userId: s.emp.id }));
@@ -966,15 +957,13 @@ function renderBulkBar() {
       ${bayarItems.length ? `<button type="button" class="btn-primary" id="bk-bayar">Tandai dibayar (${bayarItems.length})</button>` : ""}
       ${siap.length ? `<button type="button" class="btn-secondary" id="bk-tahan">Tahan (${siap.length})</button>` : ""}
       ${ditahan.length ? `<button type="button" class="btn-secondary" id="bk-lepas">Lepas tahan (${ditahan.length})</button>` : ""}
-      ${(dibayar.length && roleFlags.canFinalize) ? `<button type="button" class="btn-secondary" id="bk-batal">Batalkan status dibayar (${dibayar.length})</button>` : ""}
-      ${(dibayar.length && !roleFlags.canFinalize) ? `<span class="small muted">${dibayar.length} sudah dibayar (dilewati)</span>` : ""}
+      ${dibayar.length ? `<span class="small muted">${dibayar.length} sudah dibayar (dilewati) — untuk membatalkan, gunakan Buka Kunci</span>` : ""}
       <button type="button" class="btn-link" id="bk-clear">Batal pilihan</button>
     </div>`;
   const label = `${chosen.length} karyawan — periode ${periodLabel(period)}`;
   document.getElementById("bk-bayar")?.addEventListener("click", () => openPayModal("bayar", bayarItems, label));
   document.getElementById("bk-tahan")?.addEventListener("click", () => openPayModal("tahan", siap, label));
   document.getElementById("bk-lepas")?.addEventListener("click", () => openPayModal("lepas", ditahan, label));
-  document.getElementById("bk-batal")?.addEventListener("click", () => openPayModal("batal_bayar", dibayar, label));
   document.getElementById("bk-clear").addEventListener("click", () => { viewState.selected = new Set(); renderTable(); });
 }
 
@@ -987,16 +976,15 @@ function payCellHtml(s) {
   const cls = { siap: "badge-muted", ditahan: "badge-warn", dibayar: "badge-ok" }[st];
   const tip = st === "ditahan" ? (s.pay?.hold_reason || "")
     : st === "dibayar" ? `${s.pay?.paid_at ? fmtDate(s.pay.paid_at) : ""}${s.pay?.pay_note ? " · " + s.pay.pay_note : ""}` : "";
-  const canMenu = roleFlags.canManagePay && !(st === "dibayar" && !roleFlags.canFinalize);
+  // Slip yang sudah dibayar tidak bisa diubah dari sini; pembatalan status dibayar hanya lewat "Buka Kunci" periode.
+  const canMenu = roleFlags.canManagePay && st !== "dibayar";
   return `
     <div class="slp-paycell">
       <div>
         <span class="badge ${cls}" title="${escapeHtml(tip)}">${PAY_LABEL[st]}</span>
         ${tip ? `<div class="slp-sub" title="${escapeHtml(tip)}">${escapeHtml(tip)}</div>` : ""}
       </div>
-      ${canMenu ? (payEditOn
-        ? `<button type="button" class="slp-menu-btn" aria-label="Aksi pembayaran" aria-haspopup="menu" data-id="${id}" data-name="${nm}" data-st="${st}">⋯</button>`
-        : `<button type="button" class="slp-menu-btn" disabled aria-disabled="true" style="opacity:.4; cursor:not-allowed;" title="Terkunci — klik \"Edit Pembayaran\" di atas dulu" aria-label="Aksi pembayaran (terkunci)">⋯</button>`) : ""}
+      ${canMenu ? `<button type="button" class="slp-menu-btn" aria-label="Aksi pembayaran" aria-haspopup="menu" data-id="${id}" data-name="${nm}" data-st="${st}">⋯</button>` : ""}
     </div>`;
 }
 
@@ -1006,11 +994,10 @@ let menuListenersOn = false;
 function closeRowMenu() { menuEl?.remove(); menuEl = null; }
 function openRowMenu(btn) {
   closeRowMenu();
-  if (!payEditOn) { toast('Pembayaran terkunci — klik "Edit Pembayaran" dulu.', "error"); return; }
   const st = btn.dataset.st;
   const items = st === "siap" ? [["tahan", "⏸ Tahan gaji"], ["bayar", "✔ Tandai dibayar"]]
     : st === "ditahan" ? [["bayar", "✔ Rilis (tandai dibayar)"], ["lepas", "↩ Lepas tahan"]]
-    : roleFlags.canFinalize ? [["batal_bayar", "↩ Batalkan status dibayar"]] : [];
+    : [];
   if (!items.length) return;
   menuEl = document.createElement("div");
   menuEl.className = "slp-menu";
@@ -1207,7 +1194,6 @@ function drawPendingHolds() {
     }
     sel.value = val;
     period = val;
-    payEditOn = false;
     viewState.status = "semua"; viewState.page = 1; viewState.selected = new Set();
     loadAndRender();
   }));
