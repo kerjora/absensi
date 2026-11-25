@@ -196,11 +196,14 @@ function calc(a) {
   const bpjsTk = Math.round(a.emps.reduce((s, e) => s + (bpjsByUser[e.id]?.tk || 0), 0) * bpjsTkP / 100);
   const feeBase = gaji + (cfg.fee_atas_bpjs ? bpjsKes + bpjsTk : 0);
   const fee = Math.round(feeBase * feeP / 100);
-  const ppn = Math.round(fee * ppnP / 100);
+  // PPN: tarif x DPP. Dengan "DPP nilai lain", DPP = 11/12 x management fee (tarif tetap ditulis 12%).
+  const dppNilaiLain = !!cfg.ppn_dpp_nilai_lain;
+  const dppPpn = dppNilaiLain ? Math.round(fee * 11 / 12) : fee;
+  const ppn = Math.round(dppPpn * ppnP / 100);
   const total = gaji + bpjsKes + bpjsTk + fee + ppn;
   const pph = Math.round(fee * pphP / 100);
   const tagihan = total - pph;
-  return { cfg, feeP, ppnP, pphP, gaji, bpjsKesP, bpjsTkP, bpjsKes, bpjsTk, fee, ppn, total, pph, tagihan };
+  return { cfg, feeP, ppnP, pphP, dppNilaiLain, dppPpn, gaji, bpjsKesP, bpjsTkP, bpjsKes, bpjsTk, fee, ppn, total, pph, tagihan };
 }
 
 function rupiahPlain(n) { return Number(n).toLocaleString("id-ID"); }
@@ -236,7 +239,7 @@ function cardHtml(a, i) {
     c.bpjsKes ? [`BPJS Kesehatan`, c.bpjsKes] : null,
     c.bpjsTk ? [`BPJS Ketenagakerjaan`, c.bpjsTk] : null,
     c.feeP ? [`Management fee ${pct(c.feeP)}%`, c.fee] : null,
-    c.ppnP ? [`PPN ${pct(c.ppnP)}%`, c.ppn] : null,
+    c.ppnP ? [c.dppNilaiLain ? `PPN ${pct(c.ppnP)}% × DPP nilai lain (11/12 × fee = ${rupiahPlain(c.dppPpn)})` : `PPN ${pct(c.ppnP)}%`, c.ppn] : null,
   ].filter(Boolean);
 
   return `
@@ -337,7 +340,7 @@ function invoiceHtml(a, draft) {
   if (c.bpjsKes) rows.push([`BPJS KESEHATAN`, c.bpjsKes]);
   if (c.bpjsTk) rows.push([`BPJS KETENAGAKERJAAN`, c.bpjsTk]);
   if (c.feeP) rows.push([`MANAGEMENT FEE ${pct(c.feeP)}%`, c.fee]);
-  if (c.ppnP) rows.push([`PPN ${pct(c.ppnP)}%`, c.ppn]);
+  if (c.ppnP) rows.push([c.dppNilaiLain ? `PPN ${pct(c.ppnP)}%<br><span style="font-size:0.85em;">DPP NILAI LAIN (11/12 × MANAGEMENT FEE) = ${rupiahPlain(c.dppPpn)}</span>` : `PPN ${pct(c.ppnP)}%`, c.ppn]);
 
   const bodyRows = rows.map((r, i) => `
     <tr><td class="c">${i + 1}</td><td>${r[0]}</td><td class="r">${rupiahPlain(r[1])}</td></tr>`).join("");
@@ -418,6 +421,7 @@ function doExport() {
       "BPJS Kesehatan (Perusahaan)": c.bpjsKes,
       "BPJS Ketenagakerjaan (Perusahaan)": c.bpjsTk,
       [`Management Fee (${pct(c.feeP)}%)`]: c.fee,
+      ...(c.dppNilaiLain ? { "DPP Nilai Lain (11/12 x Fee)": c.dppPpn } : {}),
       [`PPN (${pct(c.ppnP)}%)`]: c.ppn,
       "Total": c.total,
       [`PPh 23 (${pct(c.pphP)}%)`]: c.pph,
