@@ -30,7 +30,7 @@ let period = "";
 let employees = [];   // jenis_hubungan_kerja = 'outsourcing' & aktif
 let periodInfo = null; // baris payroll_periods, null = belum final
 let slipByUser = {};  // { [userId]: totalPendapatan }
-let bpjsByUser = {};  // { [userId]: { kes, tk } } BPJS bagian perusahaan, dihitung dari snapshot slip final
+let bpjsByUser = {};  // { [userId]: { kes, tk } } dasar (upah lapor) BPJS per karyawan, dari snapshot slip final
 let vendorCfg = {};   // { [nama vendor]: baris master_pt }
 let savedByKey = {};  // { "vendor||area": outsourcing_area_invoices row }
 let areas = [];       // [{ key, vendor, area, emps }]
@@ -137,7 +137,7 @@ async function load() {
   bpjsByUser = {};
   slipRows.forEach(s => {
     slipByUser[s.user_id] = s.snapshot?.totalPendapatan ?? 0;
-    bpjsByUser[s.user_id] = bpjsPerusahaan(s.snapshot);
+    bpjsByUser[s.user_id] = bpjsDasar(s.snapshot);
   });
   savedByKey = {};
   (saved || []).forEach(r => { savedByKey[keyOf(r.vendor, r.area)] = r; });
@@ -146,15 +146,12 @@ async function load() {
   renderContent();
 }
 
-// BPJS yang ditanggung perusahaan = upah lapor × % perusahaan (Master Level, tersimpan di snapshot),
-// hanya kalau karyawan terdaftar/aktif pada periode itu (sama dengan aturan potongan di Slip Gaji:
-// keterangan kosong = aktif).
-function bpjsPerusahaan(snap) {
-  const lv = snap?.level || {};
+// Dasar BPJS per karyawan = upah lapor dari snapshot slip final, hanya kalau karyawan terdaftar/aktif
+// di periode itu (sama dengan aturan potongan di Slip Gaji: keterangan kosong = aktif).
+// Persentasenya diisi per vendor di Master PT / Vendor (bukan dari Master Level).
+function bpjsDasar(snap) {
   const up = Number(snap?.upahLapor) || 0;
-  const kes = snap?.bpjsKesKet ? 0 : up * (Number(lv.bpjs_kesehatan_perusahaan_persen) || 0) / 100;
-  const tk = snap?.bpjsTkKet ? 0 : up * (Number(lv.bpjs_tk_perusahaan_persen) || 0) / 100;
-  return { kes, tk };
+  return { kes: snap?.bpjsKesKet ? 0 : up, tk: snap?.bpjsTkKet ? 0 : up };
 }
 
 function keyOf(vendor, area) { return `${vendor}||${area}`; }
@@ -192,16 +189,18 @@ function calc(a) {
   const ppnP = Number(cfg.ppn_persen) || 0;
   const pphP = Number(cfg.pph23_persen) || 0;
   const gaji = a.emps.reduce((s, e) => s + (slipByUser[e.id] || 0), 0);
-  // Aturan tagihan BPJS perusahaan diatur per vendor di Master PT / Vendor (SQL 028).
-  const bpjsKes = cfg.bpjs_kes_ditagihkan ? Math.round(a.emps.reduce((s, e) => s + (bpjsByUser[e.id]?.kes || 0), 0)) : 0;
-  const bpjsTk = cfg.bpjs_tk_ditagihkan ? Math.round(a.emps.reduce((s, e) => s + (bpjsByUser[e.id]?.tk || 0), 0)) : 0;
+  // BPJS perusahaan: persentase & aturan fee diatur per vendor di Master PT / Vendor (SQL 028 & 029).
+  const bpjsKesP = Number(cfg.bpjs_kes_persen) || 0;
+  const bpjsTkP = Number(cfg.bpjs_tk_persen) || 0;
+  const bpjsKes = Math.round(a.emps.reduce((s, e) => s + (bpjsByUser[e.id]?.kes || 0), 0) * bpjsKesP / 100);
+  const bpjsTk = Math.round(a.emps.reduce((s, e) => s + (bpjsByUser[e.id]?.tk || 0), 0) * bpjsTkP / 100);
   const feeBase = gaji + (cfg.fee_atas_bpjs ? bpjsKes + bpjsTk : 0);
   const fee = Math.round(feeBase * feeP / 100);
   const ppn = Math.round(fee * ppnP / 100);
   const total = gaji + bpjsKes + bpjsTk + fee + ppn;
   const pph = Math.round(fee * pphP / 100);
   const tagihan = total - pph;
-  return { cfg, feeP, ppnP, pphP, gaji, bpjsKes, bpjsTk, fee, ppn, total, pph, tagihan };
+  return { cfg, feeP, ppnP, pphP, gaji, bpjsKesP, bpjsTkP, bpjsKes, bpjsTk, fee, ppn, total, pph, tagihan };
 }
 
 function rupiahPlain(n) { return Number(n).toLocaleString("id-ID"); }
@@ -234,8 +233,8 @@ function cardHtml(a, i) {
 
   const lines = [
     [`Total gaji karyawan`, c.gaji],
-    c.bpjsKes ? [`BPJS Kesehatan (ditanggung perusahaan)`, c.bpjsKes] : null,
-    c.bpjsTk ? [`BPJS Ketenagakerjaan (ditanggung perusahaan)`, c.bpjsTk] : null,
+    c.bpjsKes ? [`BPJS Kesehatan ${pct(c.bpjsKesP)}% (ditanggung perusahaan)`, c.bpjsKes] : null,
+    c.bpjsTk ? [`BPJS Ketenagakerjaan ${pct(c.bpjsTkP)}% (ditanggung perusahaan)`, c.bpjsTk] : null,
     c.feeP ? [`Management fee ${pct(c.feeP)}%`, c.fee] : null,
     c.ppnP ? [`PPN ${pct(c.ppnP)}%`, c.ppn] : null,
   ].filter(Boolean);
@@ -335,8 +334,8 @@ function invoiceHtml(a, draft) {
   const cfg = c.cfg;
   const rows = [];
   rows.push([`TOTAL GAJI KARYAWAN<br>PERIODE ${escapeHtml(fmtRangeUpper(periodInfo.period_start, periodInfo.period_end))}`, c.gaji]);
-  if (c.bpjsKes) rows.push([`BPJS KESEHATAN (DITANGGUNG PERUSAHAAN)`, c.bpjsKes]);
-  if (c.bpjsTk) rows.push([`BPJS KETENAGAKERJAAN (DITANGGUNG PERUSAHAAN)`, c.bpjsTk]);
+  if (c.bpjsKes) rows.push([`BPJS KESEHATAN ${pct(c.bpjsKesP)}% (DITANGGUNG PERUSAHAAN)`, c.bpjsKes]);
+  if (c.bpjsTk) rows.push([`BPJS KETENAGAKERJAAN ${pct(c.bpjsTkP)}% (DITANGGUNG PERUSAHAAN)`, c.bpjsTk]);
   if (c.feeP) rows.push([`MANAGEMENT FEE ${pct(c.feeP)}%`, c.fee]);
   if (c.ppnP) rows.push([`PPN ${pct(c.ppnP)}%`, c.ppn]);
 
